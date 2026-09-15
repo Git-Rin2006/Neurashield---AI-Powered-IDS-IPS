@@ -29,6 +29,8 @@ Security properties:
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import math
 import signal
 import socket
 import threading
@@ -100,20 +102,73 @@ stats_lock = threading.Lock()
 # ============================================================
 
 def discover_interfaces():
+    """
+    Discover interfaces without shell commands.
 
+    Stage 2 intentionally supports multiple interfaces, but only
+    interfaces that exist, are non-loopback, and have a usable IPv4
+    address are eligible because this pipeline processes IPv4 traffic.
+    """
     interfaces = []
 
-    for interface in socket.if_nameindex():
+    try:
+        discovered = socket.if_nameindex()
+    except OSError as exc:
+        print(f"[ERROR] Interface discovery failed: {exc}")
+        return []
 
-        _, name = interface
+    for _, name in discovered:
+        if not isinstance(name, str):
+            continue
 
-        # Never capture loopback traffic here.
-        if name == "lo":
+        name = name.strip()
+        if not name or name == "lo":
+            continue
+
+        if not interface_exists(name):
+            continue
+
+        if get_interface_ipv4(name) is None:
             continue
 
         interfaces.append(name)
 
-    return interfaces
+    return sorted(set(interfaces))
+
+
+def interface_exists(interface: str) -> bool:
+    """Return True only for a current, non-loopback interface."""
+    if not isinstance(interface, str):
+        return False
+
+    interface = interface.strip()
+    if not interface or interface == "lo":
+        return False
+
+    try:
+        available = {name for _, name in socket.if_nameindex()}
+    except OSError:
+        return False
+
+    return interface in available
+
+
+def get_interface_ipv4(interface: str) -> Optional[str]:
+    """Resolve a usable IPv4 address without executing shell commands."""
+    if not interface_exists(interface):
+        return None
+
+    try:
+        from scapy.all import get_if_addr
+        address = str(get_if_addr(interface))
+        ipaddress.IPv4Address(address)
+        if address == "0.0.0.0":
+            return None
+        return address
+    except (OSError, ValueError):
+        return None
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -173,7 +228,7 @@ def is_duplicate(packet, timestamp):
     if not fingerprint:
         return False
 
-    now = timestamp
+    now = time.monotonic()
 
     with dedup_lock:
 
@@ -219,89 +274,101 @@ def is_duplicate(packet, timestamp):
 # METADATA EXTRACTION
 # ============================================================
 
-def extract_metadata(
-    packet,
-    interface: str
-) -> Optional[PacketMetadata]:
+def _valid_ip(value: object) -> bool:
+    try:
+        ipaddress.IPv4Address(value)
+        return isinstance(value, str)
+    except (ValueError, TypeError):
+        return False
+
+
+def _valid_port(value: object) -> bool:
+    return value is None or (type(value) is int and 0 <= value <= 65535)
+
+
+def _valid_protocol(value: object) -> bool:
+    return type(value) is int and 0 <= value <= 255
+
+
+def _valid_packet_size(value: object) -> bool:
+    return type(value) is int and 0 < value <= 65535
+
+
+def _valid_timestamp(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )
+
+
+def extract_metadata(packet, interface: str) -> Optional[PacketMetadata]:
+    """
+    Convert a transient Scapy packet into sanitized PacketMetadata.
+
+    The raw packet is never placed in the queue. Once this function
+    returns, Stage 2 retains only the bounded metadata object.
+    """
+    if not interface_exists(interface):
+        return None
 
     if not packet.haslayer(IP):
         return None
 
-    ip = packet[IP]
+    try:
+        ip = packet[IP]
+        timestamp = float(getattr(packet, "time", time.time()))
+        source_ip = str(ip.src)
+        destination_ip = str(ip.dst)
+        protocol = int(getattr(ip, "proto", 0))
+        packet_size = len(packet)
 
-    timestamp = float(
-        getattr(
-            packet,
-            "time",
-            time.time()
-        )
-    )
-
-    source_ip = str(ip.src)
-    destination_ip = str(ip.dst)
-
-    source_port = None
-    destination_port = None
-
-    tcp_flags = ""
-
-    protocol = int(
-        getattr(
-            ip,
-            "proto",
-            0
-        )
-    )
-
-    if packet.haslayer(TCP):
-
-        tcp = packet[TCP]
-
-        source_port = int(
-            tcp.sport
-        )
-
-        destination_port = int(
-            tcp.dport
-        )
-
-        tcp_flags = str(
-            tcp.flags
-        )
-
-    elif packet.haslayer(UDP):
-
-        udp = packet[UDP]
-
-        source_port = int(
-            udp.sport
-        )
-
-        destination_port = int(
-            udp.dport
-        )
-
-    elif packet.haslayer(ICMP):
+        if not _valid_timestamp(timestamp):
+            return None
+        if not _valid_ip(source_ip) or not _valid_ip(destination_ip):
+            return None
+        if not _valid_protocol(protocol):
+            return None
+        if not _valid_packet_size(packet_size):
+            return None
 
         source_port = None
         destination_port = None
+        tcp_flags = ""
 
-    packet_size = len(packet)
+        if packet.haslayer(TCP):
+            tcp = packet[TCP]
+            source_port = int(tcp.sport)
+            destination_port = int(tcp.dport)
+            if not _valid_port(source_port) or not _valid_port(destination_port):
+                return None
+            tcp_flags = str(tcp.flags)
+        elif packet.haslayer(UDP):
+            udp = packet[UDP]
+            source_port = int(udp.sport)
+            destination_port = int(udp.dport)
+            if not _valid_port(source_port) or not _valid_port(destination_port):
+                return None
+        elif packet.haslayer(ICMP):
+            source_port = None
+            destination_port = None
 
-    if packet_size <= 0:
+        return PacketMetadata(
+            timestamp=timestamp,
+            source_ip=source_ip,
+            destination_ip=destination_ip,
+            source_port=source_port,
+            destination_port=destination_port,
+            protocol=protocol,
+            packet_size=packet_size,
+            tcp_flags=tcp_flags,
+            interface=interface,
+        )
+    except (TypeError, ValueError, AttributeError, OSError):
         return None
-
-    return PacketMetadata(
-        timestamp=timestamp,
-        source_ip=source_ip,
-        destination_ip=destination_ip,
-        source_port=source_port,
-        destination_port=destination_port,
-        protocol=protocol,
-        packet_size=packet_size,
-        tcp_flags=tcp_flags,
-        interface=interface,
-    )
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -309,82 +376,66 @@ def extract_metadata(
 # ============================================================
 
 def capture_worker(interface: str):
+    """Capture transient packets and enqueue metadata only."""
+    if not interface_exists(interface):
+        print(f"[ERROR] Interface validation failed: {interface}")
+        stop_event.set()
+        return
 
-    print(
-        f"[CAPTURE] Monitoring interface: {interface}"
-    )
+    ipv4 = get_interface_ipv4(interface)
+    if ipv4 is None:
+        print(f"[ERROR] No usable IPv4 address on {interface}.")
+        stop_event.set()
+        return
+
+    print(f"[CAPTURE] Monitoring interface: {interface} ({ipv4})")
 
     def handle_packet(packet):
-
         global dropped_packets
 
-        if stop_event.is_set():
-            return
-
-        timestamp = float(
-            getattr(
-                packet,
-                "time",
-                time.time()
-            )
-        )
-
-        # Only IPv4 traffic is processed in this stage.
-        if not packet.haslayer(IP):
-            return
-
-        # Short-window cross-interface deduplication.
-        if is_duplicate(
-            packet,
-            timestamp
-        ):
-
-            with stats_lock:
-                flow_aggregator.duplicate_packets += 1
-
+        if stop_event.is_set() or not packet.haslayer(IP):
             return
 
         try:
+            timestamp = float(getattr(packet, "time", time.time()))
+            if not _valid_timestamp(timestamp):
+                return
 
-            packet_queue.put_nowait(
-                (
-                    packet,
-                    interface
-                )
-            )
+            # Deduplication uses the transient packet only.
+            if is_duplicate(packet, timestamp):
+                with stats_lock:
+                    flow_aggregator.duplicate_packets += 1
+                return
 
-        except Full:
+            # Convert to sanitized metadata BEFORE queue insertion.
+            metadata = extract_metadata(packet, interface)
+            if metadata is None:
+                return
 
-            with stats_lock:
-                dropped_packets += 1
+            try:
+                packet_queue.put_nowait(metadata)
+            except Full:
+                with stats_lock:
+                    dropped_packets += 1
+
+        except Exception as exc:
+            print(f"[PACKET HANDLER ERROR] {interface}: {exc}")
 
     try:
-
         sniff(
             iface=interface,
             prn=handle_packet,
             store=False,
-            stop_filter=lambda _: (
-                stop_event.is_set()
-            ),
+            stop_filter=lambda _: stop_event.is_set(),
         )
-
     except PermissionError:
-
-        print(
-            f"[ERROR] Permission denied on "
-            f"{interface}. Run with sudo."
-        )
-
+        print(f"[ERROR] Permission denied on {interface}. Run with sudo.")
         stop_event.set()
-
+    except OSError as exc:
+        print(f"[ERROR] Capture failure on {interface}: {exc}")
+        stop_event.set()
     except Exception as exc:
-
-        print(
-            f"[ERROR] Capture failure on "
-            f"{interface}: {exc}"
-        )
-
+        print(f"[ERROR] Capture failure on {interface}: {exc}")
         stop_event.set()
 
 
@@ -393,54 +444,29 @@ def capture_worker(interface: str):
 # ============================================================
 
 def processor_worker():
-
-    while not stop_event.is_set():
-
+    """Drain metadata into Stage 3, including queued work during shutdown."""
+    while not stop_event.is_set() or not packet_queue.empty():
         try:
-
-            packet, interface = (
-                packet_queue.get(
-                    timeout=0.5
-                )
-            )
-
+            metadata = packet_queue.get(timeout=0.5)
         except Empty:
             continue
 
         try:
-
-            metadata = extract_metadata(
-                packet,
-                interface
-            )
-
-            if metadata is None:
+            if not isinstance(metadata, PacketMetadata):
                 continue
 
-            flow_aggregator.update(
-                metadata
-            )
+            flow_aggregator.update(metadata)
 
             print(
-                f"[QUEUE → FLOW] "
-                f"{interface} | "
-                f"{metadata.source_ip}:"
-                f"{metadata.source_port} → "
-                f"{metadata.destination_ip}:"
-                f"{metadata.destination_port} | "
-                f"PROTO={metadata.protocol} | "
-                f"SIZE={metadata.packet_size} | "
+                f"[QUEUE → FLOW] {metadata.interface} | "
+                f"{metadata.source_ip}:{metadata.source_port} → "
+                f"{metadata.destination_ip}:{metadata.destination_port} | "
+                f"PROTO={metadata.protocol} | SIZE={metadata.packet_size} | "
                 f"QUEUE={packet_queue.qsize()}"
             )
-
         except Exception as exc:
-
-            print(
-                f"[PROCESSOR ERROR] {exc}"
-            )
-
+            print(f"[PROCESSOR ERROR] {exc}")
         finally:
-
             packet_queue.task_done()
 
 
@@ -740,6 +766,23 @@ def main():
     except KeyboardInterrupt:
 
         shutdown_handler()
+
+    # --------------------------------------------------------
+    # Stop capture workers and drain queued metadata
+    # --------------------------------------------------------
+
+    for thread in capture_threads:
+        thread.join(timeout=2.0)
+
+    processor.join(timeout=10.0)
+
+    if not packet_queue.empty():
+        print(
+            f"[WARNING] Queue still contains {packet_queue.qsize()} "
+            "metadata item(s) after processor timeout."
+        )
+
+    reporter.join(timeout=2.0)
 
     # --------------------------------------------------------
     # Final flush
