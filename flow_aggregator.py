@@ -11,6 +11,7 @@ Responsibilities:
     - Track TCP flags
     - Aggregate packets and bytes
     - Track destination ports correctly
+    - Calculate source-level destination-port diversity
     - Calculate connection frequency
     - Expire inactive flows
     - Provide ML-ready feature dictionaries
@@ -37,16 +38,23 @@ import time
 # CONFIGURATION
 # ============================================================
 
-FLOW_TIMEOUT = 5.0
+# A flow is finalized after this period of inactivity.
+FLOW_INACTIVITY_TIMEOUT = 5.0
 
 # Window used for source-level connection frequency.
 CONNECTION_WINDOW = 60.0
+
+# Window used for source-level destination-port diversity.
+DESTINATION_PORT_WINDOW = 5.0
 
 # Protection against accidentally creating unlimited flows.
 MAX_ACTIVE_FLOWS = 50000
 
 # Protection against unlimited connection-history growth.
 MAX_CONNECTION_HISTORY = 100000
+
+# Protection against unlimited destination-port-history growth.
+MAX_DESTINATION_PORT_HISTORY = 100000
 
 
 # ============================================================
@@ -112,7 +120,12 @@ class FlowRecord:
     fin_count: int = 0
     rst_count: int = 0
 
-    # Destination ports observed from the initiator.
+    # Destination ports observed from this flow's initiator.
+    #
+    # Since a 5-tuple flow contains one destination port,
+    # this is normally a set of size 1 for a valid TCP/UDP flow.
+    #
+    # Source-level destination-port diversity is tracked separately.
     destination_ports: Set[int] = field(default_factory=set)
 
     # Track which interfaces observed the flow.
@@ -127,27 +140,49 @@ class FlowAggregator:
 
     def __init__(
         self,
-        timeout: float = FLOW_TIMEOUT,
+        timeout: float = FLOW_INACTIVITY_TIMEOUT,
         connection_window: float = CONNECTION_WINDOW,
+        destination_port_window: float = DESTINATION_PORT_WINDOW,
         max_active_flows: int = MAX_ACTIVE_FLOWS,
     ):
+
         if timeout <= 0:
-            raise ValueError("Flow timeout must be greater than zero.")
+            raise ValueError(
+                "Flow inactivity timeout must be greater than zero."
+            )
 
         if connection_window <= 0:
-            raise ValueError("Connection window must be greater than zero.")
+            raise ValueError(
+                "Connection window must be greater than zero."
+            )
+
+        if destination_port_window <= 0:
+            raise ValueError(
+                "Destination-port window must be greater than zero."
+            )
 
         if max_active_flows <= 0:
-            raise ValueError("Maximum active flows must be greater than zero.")
+            raise ValueError(
+                "Maximum active flows must be greater than zero."
+            )
 
         self.timeout = float(timeout)
         self.connection_window = float(connection_window)
+        self.destination_port_window = float(
+            destination_port_window
+        )
         self.max_active_flows = int(max_active_flows)
 
         self.active_flows: Dict[FlowKey, FlowRecord] = {}
 
         # Source IP -> timestamps of initiated connections.
         self.connection_history = defaultdict(deque)
+
+        # Source IP -> (timestamp, destination_port)
+        #
+        # Used to calculate how many distinct destination ports
+        # a source contacted during the recent behavioral window.
+        self.destination_port_history = defaultdict(deque)
 
         self.lock = RLock()
 
@@ -162,7 +197,10 @@ class FlowAggregator:
 
     @staticmethod
     def _valid_ip(value: str) -> bool:
-        return isinstance(value, str) and 0 < len(value) <= 45
+        return (
+            isinstance(value, str)
+            and 0 < len(value) <= 45
+        )
 
 
     @staticmethod
@@ -178,15 +216,24 @@ class FlowAggregator:
 
     @staticmethod
     def _valid_protocol(value: int) -> bool:
-        return isinstance(value, int) and 0 <= value <= 255
+        return (
+            isinstance(value, int)
+            and 0 <= value <= 255
+        )
 
 
     @staticmethod
     def _valid_packet_size(value: int) -> bool:
-        return isinstance(value, int) and 0 < value <= 65535
+        return (
+            isinstance(value, int)
+            and 0 < value <= 65535
+        )
 
 
-    def validate_packet(self, packet: PacketMetadata) -> bool:
+    def validate_packet(
+        self,
+        packet: PacketMetadata
+    ) -> bool:
 
         if not isinstance(packet, PacketMetadata):
             return False
@@ -209,7 +256,10 @@ class FlowAggregator:
         if not self._valid_packet_size(packet.packet_size):
             return False
 
-        if not isinstance(packet.timestamp, (int, float)):
+        if not isinstance(
+            packet.timestamp,
+            (int, float)
+        ):
             return False
 
         if packet.timestamp < 0:
@@ -223,7 +273,9 @@ class FlowAggregator:
     # ========================================================
 
     @staticmethod
-    def create_flow_key(packet: PacketMetadata) -> FlowKey:
+    def create_flow_key(
+        packet: PacketMetadata
+    ) -> FlowKey:
 
         endpoint_1 = (
             packet.source_ip,
@@ -257,9 +309,13 @@ class FlowAggregator:
     # ========================================================
 
     @staticmethod
-    def _detect_initiator(packet: PacketMetadata) -> Optional[Endpoint]:
+    def _detect_initiator(
+        packet: PacketMetadata
+    ) -> Optional[Endpoint]:
 
-        flags = (packet.tcp_flags or "").upper()
+        flags = (
+            packet.tcp_flags or ""
+        ).upper()
 
         source = (
             packet.source_ip,
@@ -286,11 +342,16 @@ class FlowAggregator:
     # UPDATE FLOW
     # ========================================================
 
-    def update(self, packet: PacketMetadata) -> Optional[FlowRecord]:
+    def update(
+        self,
+        packet: PacketMetadata
+    ) -> Optional[FlowRecord]:
 
         if not self.validate_packet(packet):
+
             with self.lock:
                 self.rejected_packets += 1
+
             return None
 
         with self.lock:
@@ -318,7 +379,9 @@ class FlowAggregator:
                     key[3]
                 )
 
-                initiator = self._detect_initiator(packet)
+                initiator = self._detect_initiator(
+                    packet
+                )
 
                 flow = FlowRecord(
                     endpoint_a=endpoint_a,
@@ -333,6 +396,7 @@ class FlowAggregator:
 
                 # Record source-level connection initiation.
                 if initiator is not None:
+
                     self._record_connection(
                         initiator[0],
                         packet.timestamp
@@ -349,7 +413,9 @@ class FlowAggregator:
             )
 
             if packet.interface:
-                flow.interfaces.add(packet.interface)
+                flow.interfaces.add(
+                    packet.interface
+                )
 
             source = (
                 packet.source_ip,
@@ -364,9 +430,12 @@ class FlowAggregator:
             # If initiator wasn't known yet, learn it from TCP.
             if flow.initiator is None:
 
-                detected = self._detect_initiator(packet)
+                detected = self._detect_initiator(
+                    packet
+                )
 
                 if detected is not None:
+
                     flow.initiator = detected
 
                     self._record_connection(
@@ -399,7 +468,9 @@ class FlowAggregator:
             # TCP flags
             # ------------------------------------------------
 
-            flags = (packet.tcp_flags or "").upper()
+            flags = (
+                packet.tcp_flags or ""
+            ).upper()
 
             if "S" in flags:
                 flow.syn_count += 1
@@ -414,20 +485,40 @@ class FlowAggregator:
                 flow.rst_count += 1
 
             # ------------------------------------------------
-            # Correct destination-port tracking
-            #
-            # Only count ports contacted by the initiator.
-            # This prevents client ephemeral ports from being
-            # incorrectly counted as destination ports.
+            # Flow-level destination-port tracking
             # ------------------------------------------------
 
+            # Only count ports contacted by the initiator.
+            #
+            # This is kept as flow metadata.
+            # Source-level destination-port diversity is handled
+            # separately below.
             if (
                 flow.initiator is not None
                 and source == flow.initiator
                 and packet.destination_port is not None
             ):
+
                 flow.destination_ports.add(
                     packet.destination_port
+                )
+
+            # ------------------------------------------------
+            # Source-level destination-port tracking
+            # ------------------------------------------------
+
+            # Every source -> destination-port observation is
+            # recorded for behavioral analysis.
+            #
+            # This is intentionally source-level rather than
+            # flow-level because a port scan creates many
+            # different 5-tuple flows.
+            if packet.destination_port is not None:
+
+                self._record_destination_port(
+                    packet.source_ip,
+                    packet.destination_port,
+                    packet.timestamp
                 )
 
             self.accepted_packets += 1
@@ -445,7 +536,9 @@ class FlowAggregator:
         timestamp: float
     ):
 
-        history = self.connection_history[source_ip]
+        history = self.connection_history[
+            source_ip
+        ]
 
         history.append(timestamp)
 
@@ -461,9 +554,14 @@ class FlowAggregator:
         current_time: float
     ):
 
-        history = self.connection_history[source_ip]
+        history = self.connection_history[
+            source_ip
+        ]
 
-        cutoff = current_time - self.connection_window
+        cutoff = (
+            current_time
+            - self.connection_window
+        )
 
         while history and history[0] < cutoff:
             history.popleft()
@@ -479,14 +577,126 @@ class FlowAggregator:
         current_time: float
     ) -> int:
 
-        self._prune_connection_history(
-            source_ip,
-            current_time
+        with self.lock:
+
+            self._prune_connection_history(
+                source_ip,
+                current_time
+            )
+
+            return len(
+                self.connection_history[source_ip]
+            )
+
+
+    # ========================================================
+    # DESTINATION PORT HISTORY
+    # ========================================================
+
+    def _record_destination_port(
+        self,
+        source_ip: str,
+        destination_port: int,
+        timestamp: float
+    ):
+
+        history = self.destination_port_history[
+            source_ip
+        ]
+
+        history.append(
+            (
+                timestamp,
+                destination_port
+            )
         )
 
-        return len(
-            self.connection_history[source_ip]
+        self._prune_destination_port_history(
+            source_ip,
+            timestamp
         )
+
+
+    def _prune_destination_port_history(
+        self,
+        source_ip: str,
+        current_time: float
+    ):
+
+        history = self.destination_port_history[
+            source_ip
+        ]
+
+        cutoff = (
+            current_time
+            - self.destination_port_window
+        )
+
+        while history:
+
+            timestamp, _ = history[0]
+
+            if timestamp < cutoff:
+                history.popleft()
+            else:
+                break
+
+        # Hard memory protection.
+        while (
+            len(history)
+            > MAX_DESTINATION_PORT_HISTORY
+        ):
+            history.popleft()
+
+
+    def get_unique_destination_ports(
+        self,
+        source_ip: str,
+        current_time: float
+    ) -> int:
+        """
+        Return the number of distinct destination ports contacted
+        by a source IP during the configured destination-port window.
+
+        This is a source-level behavioral feature.
+
+        Example:
+
+            source IP: 10.10.10.10
+
+            5-second window:
+                port 22
+                port 23
+                port 80
+                port 443
+                port 8080
+
+            result:
+                5
+        """
+
+        with self.lock:
+
+            self._prune_destination_port_history(
+                source_ip,
+                current_time
+            )
+
+            cutoff = (
+                current_time
+                - self.destination_port_window
+            )
+
+            ports = {
+                destination_port
+                for timestamp, destination_port
+                in self.destination_port_history[
+                    source_ip
+                ]
+                if timestamp >= cutoff
+            }
+
+            return len(ports)
 
 
     # ========================================================
@@ -500,10 +710,13 @@ class FlowAggregator:
 
         oldest_key = min(
             self.active_flows,
-            key=lambda k: self.active_flows[k].last_time
+            key=lambda k:
+                self.active_flows[k].last_time
         )
 
-        del self.active_flows[oldest_key]
+        del self.active_flows[
+            oldest_key
+        ]
 
 
     def get_expired_flows(
@@ -523,7 +736,8 @@ class FlowAggregator:
             ):
 
                 inactivity = (
-                    current_time - flow.last_time
+                    current_time
+                    - flow.last_time
                 )
 
                 if inactivity >= self.timeout:
@@ -563,7 +777,8 @@ class FlowAggregator:
 
         duration = max(
             0.0,
-            flow.last_time - flow.start_time
+            flow.last_time
+            - flow.start_time
         )
 
         packet_rate = (
@@ -579,7 +794,8 @@ class FlowAggregator:
         )
 
         average_packet_size = (
-            flow.total_bytes / flow.total_packets
+            flow.total_bytes
+            / flow.total_packets
             if flow.total_packets > 0
             else 0.0
         )
@@ -623,7 +839,7 @@ class FlowAggregator:
             connection_frequency = (
                 self.get_connection_frequency(
                     flow.initiator[0],
-                    flow.start_time
+                    flow.last_time
                 )
             )
 
@@ -632,65 +848,99 @@ class FlowAggregator:
             connection_frequency = 0
 
         # -----------------------------------------------
-        # Destination port count
+        # Source-level destination-port diversity
         # -----------------------------------------------
 
-        unique_destination_ports = len(
+        unique_destination_ports = (
+            self.get_unique_destination_ports(
+                source_ip,
+                flow.last_time
+            )
+        )
+
+        # -----------------------------------------------
+        # Flow-level destination-port count
+        # -----------------------------------------------
+
+        flow_destination_port_count = len(
             flow.destination_ports
         )
 
-        # If initiator information wasn't available,
-        # the known destination endpoint is still one
-        # destination port.
-        if (
-            unique_destination_ports == 0
-            and destination_port is not None
-        ):
-            unique_destination_ports = 1
-
         return {
-            "source_ip": source_ip,
-            "destination_ip": destination_ip,
 
-            "source_port": source_port,
-            "destination_port": destination_port,
+            "source_ip":
+                source_ip,
 
-            "protocol": flow.protocol,
+            "destination_ip":
+                destination_ip,
 
-            "flow_duration": round(
-                duration,
-                6
-            ),
+            "source_port":
+                source_port,
 
-            "total_packets": flow.total_packets,
+            "destination_port":
+                destination_port,
 
-            "total_bytes": flow.total_bytes,
+            "protocol":
+                flow.protocol,
 
-            "packet_rate": round(
-                packet_rate,
-                4
-            ),
+            "flow_duration":
+                round(
+                    duration,
+                    6
+                ),
 
-            "byte_rate": round(
-                byte_rate,
-                4
-            ),
+            "total_packets":
+                flow.total_packets,
 
-            "average_packet_size": round(
-                average_packet_size,
-                4
-            ),
+            "total_bytes":
+                flow.total_bytes,
 
-            "syn_count": flow.syn_count,
+            "packet_rate":
+                round(
+                    packet_rate,
+                    4
+                ),
 
-            "ack_count": flow.ack_count,
+            "byte_rate":
+                round(
+                    byte_rate,
+                    4
+                ),
 
-            "fin_count": flow.fin_count,
+            "average_packet_size":
+                round(
+                    average_packet_size,
+                    4
+                ),
 
-            "rst_count": flow.rst_count,
+            "syn_count":
+                flow.syn_count,
 
+            "ack_count":
+                flow.ack_count,
+
+            "fin_count":
+                flow.fin_count,
+
+            "rst_count":
+                flow.rst_count,
+
+            # IMPORTANT:
+            #
+            # This is now a SOURCE-LEVEL behavioral feature,
+            # not a property of one individual 5-tuple flow.
+            #
+            # It represents the number of distinct destination
+            # ports contacted by this source within the recent
+            # destination-port window.
             "unique_destination_ports":
                 unique_destination_ports,
+
+            # Number of destination ports observed within this
+            # individual flow. Normally 0 or 1 because the
+            # destination port is part of the 5-tuple.
+            "flow_destination_port_count":
+                flow_destination_port_count,
 
             "connection_frequency":
                 connection_frequency,
@@ -698,33 +948,39 @@ class FlowAggregator:
             "packets_forward":
                 (
                     flow.packets_a_to_b
-                    if flow.initiator == flow.endpoint_a
+                    if flow.initiator
+                    == flow.endpoint_a
                     else flow.packets_b_to_a
                 ),
 
             "packets_reverse":
                 (
                     flow.packets_b_to_a
-                    if flow.initiator == flow.endpoint_a
+                    if flow.initiator
+                    == flow.endpoint_a
                     else flow.packets_a_to_b
                 ),
 
             "bytes_forward":
                 (
                     flow.bytes_a_to_b
-                    if flow.initiator == flow.endpoint_a
+                    if flow.initiator
+                    == flow.endpoint_a
                     else flow.bytes_b_to_a
                 ),
 
             "bytes_reverse":
                 (
                     flow.bytes_b_to_a
-                    if flow.initiator == flow.endpoint_a
+                    if flow.initiator
+                    == flow.endpoint_a
                     else flow.bytes_a_to_b
                 ),
 
             "interfaces":
-                sorted(flow.interfaces),
+                sorted(
+                    flow.interfaces
+                ),
         }
 
 
@@ -732,7 +988,9 @@ class FlowAggregator:
 # PROTOCOL HELPER
 # ============================================================
 
-def protocol_name(protocol: int) -> str:
+def protocol_name(
+    protocol: int
+) -> str:
 
     names = {
         1: "ICMP",
@@ -750,16 +1008,25 @@ def protocol_name(protocol: int) -> str:
 # DISPLAY
 # ============================================================
 
-def print_flow(flow: FlowRecord, aggregator=None):
+def print_flow(
+    flow: FlowRecord,
+    aggregator=None
+):
 
     if aggregator is None:
         aggregator = FlowAggregator()
 
-    features = aggregator.generate_features(flow)
+    features = (
+        aggregator.generate_features(
+            flow
+        )
+    )
 
     print()
     print("=" * 70)
-    print("              NEURASHIELD - COMPLETED FLOW")
+    print(
+        "              NEURASHIELD - COMPLETED FLOW"
+    )
     print("=" * 70)
 
     print(
@@ -844,6 +1111,11 @@ def print_flow(flow: FlowRecord, aggregator=None):
     )
 
     print(
+        f"Flow Destination Ports : "
+        f"{features['flow_destination_port_count']}"
+    )
+
+    print(
         f"Connection Frequency   : "
         f"{features['connection_frequency']}"
     )
@@ -864,12 +1136,15 @@ def self_test():
 
     print()
     print("=" * 70)
-    print("        NEURASHIELD STAGE 3 SELF-TEST")
+    print(
+        "        NEURASHIELD STAGE 3 SELF-TEST"
+    )
     print("=" * 70)
 
     aggregator = FlowAggregator(
         timeout=5,
-        connection_window=60
+        connection_window=60,
+        destination_port_window=5
     )
 
     base = 1000.0
@@ -931,54 +1206,135 @@ def self_test():
     flows = aggregator.flush()
 
     if len(flows) != 1:
+
         raise AssertionError(
             "Bidirectional flow aggregation failed."
         )
 
     flow = flows[0]
 
-    features = aggregator.generate_features(flow)
+    features = aggregator.generate_features(
+        flow
+    )
 
     # --------------------------------------------------------
     # Tests
     # --------------------------------------------------------
 
-    assert features["source_ip"] == "10.10.10.10"
-    print("[PASS] Initiator direction")
+    assert (
+        features["source_ip"]
+        == "10.10.10.10"
+    )
 
-    assert features["destination_ip"] == "10.10.20.10"
-    print("[PASS] Destination direction")
+    print(
+        "[PASS] Initiator direction"
+    )
 
-    assert features["source_port"] == 50000
-    print("[PASS] Source port")
+    assert (
+        features["destination_ip"]
+        == "10.10.20.10"
+    )
 
-    assert features["destination_port"] == 80
-    print("[PASS] Destination port")
+    print(
+        "[PASS] Destination direction"
+    )
 
-    assert features["total_packets"] == 3
-    print("[PASS] Packet aggregation")
+    assert (
+        features["source_port"]
+        == 50000
+    )
 
-    assert features["total_bytes"] == 214
-    print("[PASS] Byte aggregation")
+    print(
+        "[PASS] Source port"
+    )
 
-    assert features["syn_count"] == 2
-    print("[PASS] SYN count")
+    assert (
+        features["destination_port"]
+        == 80
+    )
 
-    assert features["ack_count"] == 2
-    print("[PASS] ACK count")
+    print(
+        "[PASS] Destination port"
+    )
 
-    assert features["unique_destination_ports"] == 1
-    print("[PASS] Unique destination ports")
+    assert (
+        features["total_packets"]
+        == 3
+    )
 
-    assert features["packets_forward"] == 2
-    print("[PASS] Forward packet count")
+    print(
+        "[PASS] Packet aggregation"
+    )
 
-    assert features["packets_reverse"] == 1
-    print("[PASS] Reverse packet count")
+    assert (
+        features["total_bytes"]
+        == 214
+    )
+
+    print(
+        "[PASS] Byte aggregation"
+    )
+
+    assert (
+        features["syn_count"]
+        == 2
+    )
+
+    print(
+        "[PASS] SYN count"
+    )
+
+    assert (
+        features["ack_count"]
+        == 2
+    )
+
+    print(
+        "[PASS] ACK count"
+    )
+
+    assert (
+        features["flow_destination_port_count"]
+        == 1
+    )
+
+    print(
+        "[PASS] Flow destination-port tracking"
+    )
+
+    assert (
+        features["unique_destination_ports"]
+        == 1
+    )
+
+    print(
+        "[PASS] Source-level destination-port diversity"
+    )
+
+    assert (
+        features["packets_forward"]
+        == 2
+    )
+
+    print(
+        "[PASS] Forward packet count"
+    )
+
+    assert (
+        features["packets_reverse"]
+        == 1
+    )
+
+    print(
+        "[PASS] Reverse packet count"
+    )
 
     assert "ens37" in features["interfaces"]
     assert "ens38" in features["interfaces"]
-    print("[PASS] Interface tracking")
+
+    print(
+        "[PASS] Interface tracking"
+    )
 
     # --------------------------------------------------------
     # Connection frequency test
@@ -991,7 +1347,9 @@ def self_test():
         packet = PacketMetadata(
             timestamp=2000.0 + index,
             source_ip="10.10.10.10",
-            destination_ip=f"10.10.20.{20 + index}",
+            destination_ip=(
+                f"10.10.20.{20 + index}"
+            ),
             source_port=40000 + index,
             destination_port=80,
             protocol=6,
@@ -1006,18 +1364,115 @@ def self_test():
         aggregator.active_flows.values()
     )[-1]
 
-    test_features = aggregator.generate_features(
-        test_flow
+    test_features = (
+        aggregator.generate_features(
+            test_flow
+        )
     )
 
-    assert test_features["connection_frequency"] == 3
-    print("[PASS] Connection frequency")
+    assert (
+        test_features["connection_frequency"]
+        == 3
+    )
+
+    print(
+        "[PASS] Connection frequency"
+    )
+
+    # --------------------------------------------------------
+    # Destination-port diversity test
+    # --------------------------------------------------------
+
+    aggregator = FlowAggregator(
+        destination_port_window=5
+    )
+
+    scanned_ports = [
+        21,
+        22,
+        23,
+        25,
+        53,
+        80,
+        443,
+    ]
+
+    for index, port in enumerate(
+        scanned_ports
+    ):
+
+        packet = PacketMetadata(
+            timestamp=3000.0 + (index * 0.5),
+            source_ip="10.10.10.50",
+            destination_ip="10.10.20.10",
+            source_port=45000 + index,
+            destination_port=port,
+            protocol=6,
+            packet_size=74,
+            tcp_flags="S",
+            interface="ens37",
+        )
+
+        aggregator.update(packet)
+
+    scan_flow = list(
+        aggregator.active_flows.values()
+    )[-1]
+
+    scan_features = (
+        aggregator.generate_features(
+            scan_flow
+        )
+    )
+
+    assert (
+        scan_features[
+            "unique_destination_ports"
+        ]
+        == 7
+    )
+
+    print(
+        "[PASS] Source-level unique destination ports"
+    )
+
+    # --------------------------------------------------------
+    # Destination-port window expiry test
+    # --------------------------------------------------------
+
+    port_count_after_window = (
+        aggregator.get_unique_destination_ports(
+            "10.10.10.50",
+            3008.001
+        )
+    )
+
+    assert (
+        port_count_after_window
+        == 0
+    )
+
+    print(
+        "[PASS] Destination-port window expiration"
+    )
+
+    # --------------------------------------------------------
+    # Final result
+    # --------------------------------------------------------
 
     print("-" * 70)
-    print("[PASS] STAGE 3 SELF-TEST: ALL TESTS PASSED")
+
+    print(
+        "[PASS] STAGE 3 SELF-TEST: ALL TESTS PASSED"
+    )
+
     print("=" * 70)
     print()
-    print("Stage 3 is ready for integration.")
+
+    print(
+        "Stage 3 is ready for integration."
+    )
+
     print()
 
 
