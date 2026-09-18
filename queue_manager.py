@@ -53,7 +53,7 @@ from flow_aggregator import (
     protocol_name,
 )
 
-
+from rule_detector import RuleDetector
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -83,7 +83,7 @@ packet_queue = Queue(
 flow_aggregator = FlowAggregator(
     timeout=FLOW_TIMEOUT
 )
-
+rule_detector = RuleDetector()
 stop_event = threading.Event()
 
 capture_threads = []
@@ -511,6 +511,12 @@ def print_completed_flow(flow):
         .generate_features(flow)
     )
 
+    # ============================================================
+    # STAGE 4 - RULE-BASED DETECTION
+    # ============================================================
+
+    alerts = rule_detector.analyze(features)
+
     print()
     print("=" * 70)
     print(
@@ -608,6 +614,63 @@ def print_completed_flow(flow):
         f"Interfaces             : "
         f"{', '.join(features['interfaces']) or 'N/A'}"
     )
+
+    # ============================================================
+    # SECURITY ALERTS
+    # ============================================================
+
+    if alerts:
+
+        print()
+        print("              SECURITY ALERTS")
+        print("-" * 70)
+
+        for alert in alerts:
+
+            print(
+                f"Rule ID               : "
+                f"{alert.rule_id}"
+            )
+
+            print(
+                f"Threat                : "
+                f"{alert.threat}"
+            )
+
+            print(
+                f"Severity              : "
+                f"{alert.severity}"
+            )
+
+            print(
+                f"Confidence            : "
+                f"{alert.confidence}"
+            )
+
+            print(
+                f"Source IP             : "
+                f"{alert.source_ip}"
+            )
+
+            print(
+                f"Destination IP        : "
+                f"{alert.destination_ip}"
+            )
+
+            print(
+                f"Evidence              : "
+                f"{alert.evidence}"
+            )
+
+            print("-" * 70)
+
+    else:
+
+        print()
+        print(
+            "Security Status        : "
+            "NO RULE-BASED ALERTS"
+        )
 
     print("=" * 70)
 
