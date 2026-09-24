@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuraShield — Production Console & Active IPS</title>
+    <meta name="description" content="Production Network Directory View, Active IPS Firewall & Intrusion Detection Console">
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+    <div class="app-container">
+        <!-- Main Content Area -->
+        <main class="main-content">
+            
+            <!-- Top Header Bar -->
+            <header class="top-header">
+                <div class="header-title">
+                    <div class="header-logo">
+                        <i class="fa-solid fa-network-wired"></i>
+                    </div>
+                    <div>
+                        <h2>NeuraShield Production Console <span class="badge-v">v2.4 (Active IPS)</span></h2>
+                        <span class="subtitle">Interfaces: <code>ens33</code> (Host) | <code>ens37</code> (VM1) | <code>ens38</code> (VM2)</span>
+                    </div>
+                </div>
+
+                <div class="header-actions">
+                    <button class="btn btn-secondary" id="btn-clear-logs" style="background:rgba(239,68,68,0.12); color:var(--accent-red); border-color:rgba(239,68,68,0.3);">
+                        <i class="fa-solid fa-trash-can"></i> Clear History
+                    </button>
+                    <button class="btn btn-primary" id="btn-refresh-data">
+                        <i class="fa-solid fa-rotate-right"></i> Refresh Telemetry
+                    </button>
+                    <div class="clock-display" id="live-clock">00:00:00</div>
+                </div>
+            </header>
+
+            <!-- Navigation Tabs Bar -->
+            <div class="nav-tabs-bar">
+                <button class="nav-tab-btn active" data-tab="tab-overview">
+                    <i class="fa-solid fa-chart-line"></i> Overview & Telemetry
+                </button>
+                <button class="nav-tab-btn" data-tab="tab-flows">
+                    <i class="fa-solid fa-wave-square"></i> Live Packet Flows
+                </button>
+                <button class="nav-tab-btn" data-tab="tab-db-logs">
+                    <i class="fa-solid fa-database"></i> Database Log Explorer
+                </button>
+                <button class="nav-tab-btn" data-tab="tab-ips-rules">
+                    <i class="fa-solid fa-shield-halved"></i> IPS Firewall & Rules
+                </button>
+            </div>
+
+            <!-- Dashboard Content Body -->
+            <div class="content-body">
+
+                <!-- ============================================================ -->
+                <!-- TAB 1: OVERVIEW & TELEMETRY -->
+                <!-- ============================================================ -->
+                <div class="tab-panel active" id="tab-overview">
+                    
+                    <!-- Top Metrics Grid -->
+                    <div class="metrics-grid">
+                        <div class="metric-card glass-card">
+                            <div class="card-icon blue"><i class="fa-solid fa-bolt"></i></div>
+                            <div class="card-data">
+                                <span class="card-label">Accepted Packets</span>
+                                <h3 class="card-value" id="val-packets">0</h3>
+                                <span class="card-trend neutral">Live kernel stream</span>
+                            </div>
+                        </div>
+
+                        <div class="metric-card glass-card">
+                            <div class="card-icon cyan"><i class="fa-solid fa-diagram-project"></i></div>
+                            <div class="card-data">
+                                <span class="card-label">Active Flows</span>
+                                <h3 class="card-value" id="val-flows">0</h3>
+                                <span class="card-trend">5s window</span>
+                            </div>
+                        </div>
+
+                        <div class="metric-card glass-card">
+                            <div class="card-icon orange"><i class="fa-solid fa-shield-virus"></i></div>
+                            <div class="card-data">
+                                <span class="card-label">Total Threat Events</span>
+                                <h3 class="card-value" id="val-threats">0</h3>
+                                <span class="card-trend warning">Rule + ML Engine</span>
+                            </div>
+                        </div>
+
+                        <div class="metric-card glass-card">
+                            <div class="card-icon red"><i class="fa-solid fa-fire-flame-curved"></i></div>
+                            <div class="card-data">
+                                <span class="card-label">Blocked IPs (IPS)</span>
+                                <h3 class="card-value" id="val-blocked">0</h3>
+                                <span class="card-trend danger">Active Firewall Quarantine</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Topology Node Tree Map -->
+                    <div class="section-container">
+                        <div class="section-header">
+                            <h2><i class="fa-solid fa-folder-tree"></i> Network Subnet & Node Topology Map</h2>
+                            <span class="section-tag">Inter-VM Gateway Stream</span>
+                        </div>
+
+                        <div class="tree-container glass-card">
+                            <div class="tree-root">
+                                <div class="tree-node root-node" onclick="filterByNode('VM3')">
+                                    <i class="fa-solid fa-globe tree-icon glow-blue"></i>
+                                    <div class="tree-content">
+                                        <span class="tree-label">Network Domain (10.1.1.0/24 Subnet)</span>
+                                        <small class="text-muted">Central Network Environment</small>
+                                    </div>
+                                </div>
+
+                                <div class="tree-branch">
+                                    <div class="tree-item">
+                                        <div class="tree-connector"></div>
+                                        <div class="tree-node gateway-node">
+                                            <i class="fa-solid fa-server tree-icon glow-cyan"></i>
+                                            <div class="tree-content">
+                                                <span class="tree-label">VM 3: Ubuntu Gateway & NeuraShield IPS</span>
+                                                <span class="code-tag">10.1.1.101 / 10.10.10.1</span>
+                                                <small class="text-muted">Core Firewall & AI Sniffer Engine</small>
+                                            </div>
+                                            <span class="badge-status status-green">GATEWAY ONLINE</span>
+                                        </div>
+
+                                        <div class="tree-subbranch">
+                                            <div class="tree-item">
+                                                <div class="tree-connector"></div>
+                                                <div class="tree-node folder-node">
+                                                    <i class="fa-solid fa-folder-open tree-icon folder-icon"></i>
+                                                    <div class="tree-content">
+                                                        <span class="tree-label">Segment 1: Office Subnet 1</span>
+                                                        <span class="code-tag">10.10.10.0/24</span>
+                                                    </div>
+                                                </div>
+
+                                                <div class="tree-subbranch">
+                                                    <div class="tree-item" onclick="filterByNode('10.10.10.10')">
+                                                        <div class="tree-connector"></div>
+                                                        <div class="tree-node pc-node" id="tree-node-vm1">
+                                                            <i class="fa-solid fa-desktop tree-icon"></i>
+                                                            <div class="tree-content">
+                                                                <span class="tree-label">VM 1 (Office PC 1)</span>
+                                                                <span class="code-tag">10.10.10.10</span>
+                                                                <small class="text-muted" id="tree-meta-vm1">Workstation Node</small>
+                                                            </div>
+                                                            <span class="badge-status" id="tree-status-vm1">ONLINE</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div class="tree-item">
+                                                <div class="tree-connector"></div>
+                                                <div class="tree-node folder-node">
+                                                    <i class="fa-solid fa-folder-open tree-icon folder-icon"></i>
+                                                    <div class="tree-content">
+                                                        <span class="tree-label">Segment 2: Office Subnet 2</span>
+                                                        <span class="code-tag">10.10.20.0/24</span>
+                                                    </div>
+                                                </div>
+
+                                                <div class="tree-subbranch">
+                                                    <div class="tree-item" onclick="filterByNode('10.10.20.10')">
+                                                        <div class="tree-connector"></div>
+                                                        <div class="tree-node pc-node" id="tree-node-vm2">
+                                                            <i class="fa-solid fa-desktop tree-icon"></i>
+                                                            <div class="tree-content">
+                                                                <span class="tree-label">VM 2 (Office PC 2)</span>
+                                                                <span class="code-tag">10.10.20.10</span>
+                                                                <small class="text-muted" id="tree-meta-vm2">Workstation Node</small>
+                                                            </div>
+                                                            <span class="badge-status" id="tree-status-vm2">ONLINE</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Active Threat Warning Cards -->
+                    <div class="section-container">
+                        <div class="section-header">
+                            <h2><i class="fa-solid fa-triangle-exclamation"></i> Recent Active Threats</h2>
+                            <div class="search-box">
+                                <i class="fa-solid fa-magnifying-glass"></i>
+                                <input type="text" id="threat-search" placeholder="Filter by IP, Threat, or Rule..." onkeyup="filterThreats()">
+                            </div>
+                        </div>
+
+                        <div class="warnings-grid" id="warnings-container">
+                            <div class="empty-state glass-card">
+                                <i class="fa-solid fa-shield-check" style="color:var(--accent-green); font-size:1.5rem;"></i>
+                                <p>No active threats detected. Network is clean.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Traffic Analytics Charts -->
+                    <div class="charts-grid">
+                        <div class="chart-card glass-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-chart-area"></i> Live Network Traffic Rate</h3>
+                                <span class="chart-tag">Packets / sec & Active Flows</span>
+                            </div>
+                            <div class="chart-container">
+                                <canvas id="chart-traffic"></canvas>
+                            </div>
+                        </div>
+
+                        <div class="chart-card glass-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-chart-pie"></i> Threat Distribution</h3>
+                                <span class="chart-tag">Breakdown by Type</span>
+                            </div>
+                            <div class="chart-container">
+                                <canvas id="chart-threats"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============================================================ -->
+                <!-- TAB 2: LIVE PACKET FLOWS EXPLORER -->
+                <!-- ============================================================ -->
+                <div class="tab-panel" id="tab-flows">
+                    <div class="section-container">
+                        <div class="section-header">
+                            <h2><i class="fa-solid fa-wave-square"></i> Live 5-Tuple Network Packet Flows</h2>
+                            <span class="section-tag">Real-Time Flow Aggregator Output</span>
+                        </div>
+
+                        <div class="table-card glass-card">
+                            <div class="table-wrapper">
+                                <table class="custom-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Source IP:Port</th>
+                                            <th>Destination IP:Port</th>
+                                            <th>Protocol</th>
+                                            <th>Flow Duration</th>
+                                            <th>Packets</th>
+                                            <th>Total Bytes</th>
+                                            <th>Packet Rate</th>
+                                            <th>Byte Rate</th>
+                                            <th>SYN / ACK</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="flows-tbody">
+                                        <tr>
+                                            <td colspan="9" class="text-center py-4 text-muted">
+                                                <i class="fa-solid fa-spinner fa-spin"></i> Fetching active packet flows...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============================================================ -->
+                <!-- TAB 3: DATABASE LOG EXPLORER -->
+                <!-- ============================================================ -->
+                <div class="tab-panel" id="tab-db-logs">
+                    <div class="section-container">
+                        <div class="table-card glass-card">
+                            <div class="table-header">
+                                <div class="table-title">
+                                    <h3><i class="fa-solid fa-database"></i> SQLite Threat Database Log Explorer</h3>
+                                    <span class="table-subtitle">Search, filter, and export incident audit logs</span>
+                                </div>
+
+                                <div class="table-filters form-inline">
+                                    <input type="text" id="log-search" class="input-field" placeholder="Search logs by IP, Threat, Evidence..." onkeyup="fetchIncidents()">
+                                    <select id="filter-severity" class="input-field" onchange="fetchIncidents()">
+                                        <option value="">All Severities</option>
+                                        <option value="HIGH">HIGH</option>
+                                        <option value="CRITICAL">CRITICAL</option>
+                                        <option value="MEDIUM">MEDIUM</option>
+                                    </select>
+                                    <button class="btn btn-secondary" onclick="exportCSVLog()">
+                                        <i class="fa-solid fa-file-csv"></i> Export CSV
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="table-wrapper">
+                                <table class="custom-table">
+                                    <thead>
+                                        <tr>
+                                            <th>ID</th>
+                                            <th>Timestamp</th>
+                                            <th>Rule/Model</th>
+                                            <th>Threat Type</th>
+                                            <th>Severity</th>
+                                            <th>Confidence</th>
+                                            <th>Source IP</th>
+                                            <th>Dest IP</th>
+                                            <th>Evidence Details</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="incidents-tbody">
+                                        <tr>
+                                            <td colspan="9" class="text-center py-4 text-muted">
+                                                <i class="fa-solid fa-spinner fa-spin"></i> Loading SQLite logs...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ============================================================ -->
+                <!-- TAB 4: IPS FIREWALL & RULES CONSOLE -->
+                <!-- ============================================================ -->
+                <div class="tab-panel" id="tab-ips-rules">
+                    <!-- Manual IP Block Form & Active Blocked Table -->
+                    <div class="section-container">
+                        <div class="section-header">
+                            <h2><i class="fa-solid fa-fire-flame-curved"></i> Active IPS Firewall Quarantine Console</h2>
+                            <span class="section-tag">Linux iptables Drop Rules</span>
+                        </div>
+
+                        <div class="table-card glass-card" style="margin-bottom: 24px;">
+                            <div class="table-header">
+                                <h3><i class="fa-solid fa-lock"></i> Manual IP Quarantine Block</h3>
+                            </div>
+                            <div style="padding: 16px;">
+                                <form id="form-block-ip" class="form-inline" onsubmit="handleManualBlock(event)">
+                                    <input type="text" id="block-target-ip" class="input-field" placeholder="Enter IP (e.g. 10.10.10.50)" required style="width:240px;">
+                                    <input type="text" id="block-reason" class="input-field" placeholder="Reason (e.g. MANUAL_SUSPICIOUS)" style="width:220px;">
+                                    <select id="block-duration" class="input-field">
+                                        <option value="300">5 Minutes Quarantine</option>
+                                        <option value="900" selected>15 Minutes Quarantine</option>
+                                        <option value="3600">1 Hour Quarantine</option>
+                                        <option value="86400">24 Hours Quarantine</option>
+                                    </select>
+                                    <button type="submit" class="btn btn-primary" style="background:var(--accent-red); border-color:var(--accent-red);">
+                                        <i class="fa-solid fa-hand"></i> Block IP Now
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+
+                        <div class="table-card glass-card">
+                            <div class="table-header">
+                                <h3><i class="fa-solid fa-ban"></i> Currently Quarantined / Blocked Hosts</h3>
+                            </div>
+                            <div class="table-wrapper">
+                                <table class="custom-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Target IP</th>
+                                            <th>Threat Cause</th>
+                                            <th>Severity</th>
+                                            <th>Blocked At</th>
+                                            <th>Unblock At</th>
+                                            <th>Action By</th>
+                                            <th>Status</th>
+                                            <th>Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="blocked-tbody">
+                                        <tr>
+                                            <td colspan="8" class="text-center py-4 text-muted">
+                                                <i class="fa-solid fa-spinner fa-spin"></i> Loading IPS firewall status...
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Rules & AI Engine Registry -->
+                    <div class="section-container" style="margin-top: 24px;">
+                        <div class="section-header">
+                            <h2><i class="fa-solid fa-sliders"></i> Detection Rules & AI Engine Status</h2>
+                        </div>
+
+                        <div class="charts-grid">
+                            <div class="table-card glass-card">
+                                <div class="table-header">
+                                    <h3><i class="fa-solid fa-list"></i> Layer 1 Heuristic Rules Registry</h3>
+                                </div>
+                                <div class="table-wrapper">
+                                    <table class="custom-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Rule ID</th>
+                                                <th>Rule Name</th>
+                                                <th>Threshold Condition</th>
+                                                <th>Severity</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="rules-tbody">
+                                            <tr>
+                                                <td colspan="4" class="text-center py-4 text-muted">Loading rule registry...</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="table-card glass-card">
+                                <div class="table-header">
+                                    <h3><i class="fa-solid fa-brain"></i> AI & ML Detection Status</h3>
+                                </div>
+                                <div style="padding: 20px;" id="ml-status-box">
+                                    <i class="fa-solid fa-spinner fa-spin"></i> Checking ML model status...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
